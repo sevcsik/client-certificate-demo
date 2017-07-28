@@ -1,6 +1,6 @@
-// -----------------------------------------------------
-// title: Generating and Installing Client Certificates
-// -----------------------------------------------------
+// ------------------------------------------------------
+// title: Generating and Provisioning Client Certificates
+// ------------------------------------------------------
 
 "use strict"
 
@@ -28,7 +28,7 @@ app.use(flash())
 class Cert {
 	constructor(uid, userAgentString) {
 		this.hash = null
-		this.issuedAt = null
+		this.issuedAt = new Date()
 		this.p12 = null
 		this.serial = Math.floor(Math.random() * 100000000)
 		this.userAgent = userAgentString
@@ -66,14 +66,17 @@ const db = [ { uid: 'Alice', password: 'password', certs: [], data: 'such sensit
            ]
 
 const requireAuthentication = level => (req, res, next) => {
-	if (req.session.authentication === level) {
-		const user = db.find(user => user.uid === req.session.uid)
-		if (user) {
-			req.user = user
+	const user = db.find(user => user.uid === req.session.uid)
+	req.user = user
+	if (level === 'half' && req.session.authentication === level) {
+		next()
+	} else if (level === 'full' && req.session.authentication === level) {
+		const cert = user.certs.find(cert => cert.serial === req.session.serial)
+		if (cert && !cert.revoked) {
 			next()
 		} else {
-			req.flash('Your session is invalid, please log in again.')
-			req.session.destroy()
+			req.flash('error', 'Your certificate has been revoked, delete your certificate and log in again.')
+			req.session.authentication = null
 			res.redirect('/password-login')
 		}
 	} else if (req.session.authentication === 'half' && level === 'full') {
@@ -85,7 +88,7 @@ const requireAuthentication = level => (req, res, next) => {
 
 app.get('/password-login', (req, res) => {
 	res.send(`
-		<p>${req.flash('error') || ''}</p>
+		${req.flash('error') || ''}
 		<form method="POST">
 			<p><input name="username" placeholder="username"></p>
 			<p><input name="password" type="password" placeholder="password"></p>
@@ -114,11 +117,12 @@ app.get('/verify-certificate', (req, res) => {
 		if (!cert || !req.client.authorized) throw 'No valid certificate'
 		const user = db.find(user => user.uid === cert.subject.CN)
 		if (!user) throw `No such user: ${cert.subject.CN}`
-		const certEntry = user.certs.find((certEntry) => parseInt(cert.serialNumber, 16) === certEntry.serial)
+		const serial = parseInt(cert.serialNumber, 16)
+		const certEntry = user.certs.find((certEntry) => certEntry.serial === serial)
 		if (!certEntry) throw `Unknown certificate: ${cert.subject.CN} [${cert.hash}]`
-		if (certEntry.revoked) throw `Certificate has been revoked: ${cert.subject.CN} [${cert.hash}]`
 		req.session.authentication = 'full'
 		req.session.uid = cert.subject.CN
+		req.session.serial = serial
 		certEntry.p12 = null
 		res.redirect('/')
 	} catch (errorMessage) {
@@ -128,14 +132,19 @@ app.get('/verify-certificate', (req, res) => {
 })
 
 app.get('/create-pkcs12', requireAuthentication('half'), (req, res) => {
-	res.send(`We sent an email to download your client certificate.
-	          Open the link <strong>in this browser</strong> to download the certificate, and add import it.`)
+	res.send(`You successfully logged in, but you don't have a valid certificate installed in this browser.
+	          <form method="POST"><input type="submit" value="Create certificate"></form>`)
+})
 
-	const cert = new Cert(req.user.uid, req.headers['User-Agent'])
+app.post('/create-pkcs12', requireAuthentication('half'), (req, res) => {
+	const cert = new Cert(req.user.uid, req.headers['user-agent'])
 	req.user.certs.push(cert)
 	cert.generate().then(hash => {
 		console.log(`Certificate download URL: https://localhost:9999/download-pkcs12/${hash}/certificate.p12`)
 	})
+
+	res.send(`We sent an email to download your client certificate.
+	          Open the link <strong>in this browser</strong> to download the certificate, and add import it.`)
 })
 
 app.get('/download-pkcs12/:hash/certificate.p12', requireAuthentication('half'), (req, res) => {
@@ -154,8 +163,52 @@ app.get('/download-pkcs12/:hash/certificate.p12', requireAuthentication('half'),
 	}
 })
 
+app.get('/revoke-certificate', requireAuthentication('full'), (req, res) => {
+	const certs = req.user.certs.filter(cert => !cert.revoked)
+	const options = certs.map(cert => `<option value="${cert.serial}">
+	                                       Issued at ${cert.issuedAt} to ${cert.userAgent}
+	                                   </option>`)
+	                     .concat('\n')
+
+	res.send(`Hi ${req.user.uid}, please select a certificate to revoke:
+	          <form method="POST">
+	             <select name="certificate">${options}</select>
+	             <input type="submit" value="Revoke">
+	          </form>`)
+})
+
+app.post('/revoke-certificate', requireAuthentication('full'), (req, res) => {
+	const serial = req.body.certificate
+	if (serial) {
+		const cert = req.user.certs.find(cert => cert.serial === parseInt(serial, 10))
+		if (cert) {
+			cert.revoked = true
+			if (cert.serial === req.session.serial) {
+				session.destroy()
+				res.redirect('/')
+			} else {
+				res.send('The certificate has been revoked. <a href="/">Go back</a>')
+			}
+		} else {
+			res.status(404).send('No such certificate')
+		}
+	} else {
+		res.status(400).send('Bad request')
+	}
+})
+
 app.get('/', requireAuthentication('full'), (req, res) => {
-	res.send(`Hello ${req.user.uid}, here's your data: ${req.user.data}`)
+	res.send(`Hello ${req.user.uid}, here's your data: ${req.user.data}
+	          <a href="/revoke-certificate">Revoke certificates</a>`)
 })
 
 https.createServer(httpsOpts, app).listen(9999)
+
+// Sources
+// =======
+// - ["Alternatives to HTML's deprecated <keygen> for client certs?" on Security StackExchange](https://security.stackexchange.com/questions/106257/alternatives-to-htmls-deprecated-keygen-for-client-certs)
+// - [Javascript Crypto on MDN](https://developer.mozilla.org/en-US/docs/Archive/Mozilla/JavaScript_crypto)
+// - [Intent to Remove: Keygen on blink-dev](https://groups.google.com/a/chromium.org/forum/#!msg/blink-dev/z_qEpmzzKh8/BH-lkwdgBAAJ
+// - [Old Web Crypto API on W3C](https://groups.google.com/a/chromium.org/forum/#!msg/blink-dev/z_qEpmzzKh8/BH-lkwdgBAAJ)
+// - ["How do you pipe a long string to /dev/stdin via child_process.spawn() in Node.js?" on javacms](http://www.javacms.tech/questions/408044/how-do-you-pipe-a-long-string-to-dev-stdin-via-child-process-spawn-in-node-js)
+// - [PKI.js](https://pkijs.org/)
