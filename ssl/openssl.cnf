@@ -1,0 +1,28 @@
+[ ca ]
+default_ca = DemoCA
+
+[ DemoCA ]
+dir = ssl
+certificate = $dir//server_cert.pem
+private_key = $dir/server_key.pem
+serial = $dir/serial
+database = $dir/index
+new_certs_dir = $dir/clcerts
+default_md = md5
+policy = policy
+
+default_days = 365
+x509_extensions = usr_cert
+
+[ usr_cert ]
+basicConstraints = CA:FALSE
+nsComment = "Client certificat for demo purposes"
+
+[ policy ]
+countryName = optional
+stateOrProvinceName = optional
+localityName = optional
+organizationName = optional
+organizationalUnitName = optional
+commonName = supplied
+emailAddress = optional
