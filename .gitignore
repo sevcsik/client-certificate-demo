@@ -1,1 +1,6 @@
 node_modules
+ssl/serial
+ssl/index
+ssl/index.attr
+ssl/clcerts/*
+ssl/*.old

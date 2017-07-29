@@ -11,13 +11,12 @@ const session = require('express-session')
 const fs = require('fs')
 const https = require('https')
 const { exec } = require('child_process')
-const { createHash } = require('crypto')
 
-const httpsOpts = { key: fs.readFileSync('server_key.pem')
-                  , cert: fs.readFileSync('server_cert.pem')
+const httpsOpts = { key: fs.readFileSync('ssl/server_key.pem')
+                  , cert: fs.readFileSync('ssl/server_cert.pem')
                   , requestCert: true
                   , rejectUnauthorized: false
-                  , ca: [ fs.readFileSync('server_cert.pem') ]
+                  , ca: [ fs.readFileSync('ssl/server_cert.pem') ]
                   }
 
 const app = express()
@@ -27,36 +26,67 @@ app.use(flash())
 
 class Cert {
 	constructor(uid, userAgentString) {
-		this.hash = null
+		this.fingerprint = null
 		this.issuedAt = new Date()
 		this.p12 = null
-		this.serial = Math.floor(Math.random() * 100000000)
 		this.userAgent = userAgentString
 		this.revoked = false
 		this.uid = uid
 	}
 
-	generate() {
+	createX509(spkac) {
+		return new Promise((resolve, reject) => {
+			const ca = exec(`cat | openssl ca -batch -spkac /dev/stdin -config ssl/openssl.cnf -subj /CN=${this.uid}`
+				, (error, stdout, stderr) => {
+					if (error) reject(error)
+					else resolve(stdout)
+				})
+
+			ca.stdin.write('SPKAC=' + spkac)
+			ca.stdin.end()
+		}).then(this.getFingerprint).then(fingerprint => this.fingerprint = fingerprint)
+	}
+
+	generatePkcs12() {
 		return new Promise((resolve, reject) => {
 			let key
 			const keygen = exec('openssl genrsa 4096', (error, stdout, stderr) => key = stdout)
-			const req = exec(`cat | openssl req -key /dev/stdin -new -nodes -days 365 -subj /CN=${this.uid}`)
-			const x509 = exec(`openssl x509 -req -CA server_cert.pem -CAkey server_key.pem -set_serial ${this.serial} -days 365`, (error, stdout, stderr) => {
-				const cert = stdout
-				const pkcs12 = exec(`openssl pkcs12 -export -clcerts -nodes -password pass: -name "${this.uid}"`, { encoding: null }, (error, stdout, stderr) => {
-					this.p12 = stdout
-
-					const hash = createHash('sha1')
-					hash.update(stdout)
-					this.hash = hash.digest('hex')
-					resolve(this.hash)
+			const req = exec(`cat | openssl req -new -key /dev/stdin -batch`, (error, stdout, stderr) => console.error(stderr))
+			const ca = exec(`cat | openssl ca -in /dev/stdin -config ssl/openssl.cnf -batch -subj /CN=${this.uid}`
+				, (error, stdout, stderr) => {
+					if (error) reject(error)
+					else resolve({ key, cert: stdout })
 				})
-				pkcs12.stdin.write(key + cert)
-				pkcs12.stdin.end()
-			})
 
 			keygen.stdout.pipe(req.stdin)
-			req.stdout.pipe(x509.stdin)
+			req.stdout.pipe(ca.stdin)
+		}).then(({ key, cert }) => Promise.all(
+			[ new Promise((resolve, reject) => {
+				const pkcs12 = exec(`openssl pkcs12 -export -clcerts -nodes -password pass: -name "${this.uid}"`
+					, { encoding: null }
+					, (error, stdout, stderr) => {
+						if (error) reject(error)
+						else {
+							resolve()
+							this.p12 = stdout
+						}
+					})
+
+				pkcs12.stdin.write(key + cert)
+				pkcs12.stdin.end()
+			}), this.getFingerprint(cert)]
+		)).then(([_, fingerprint]) => this.fingerprint = fingerprint)
+	}
+
+	getFingerprint(cert) {
+		return new Promise((resolve, reject) => {
+			const x509 = exec(`openssl x509 -fingerprint -out /dev/null`, (error, stdout, stderr) => {
+				if (error) reject(error)
+				else resolve(stdout.split('=')[1].trim())
+			})
+
+			x509.stdin.write(cert)
+			x509.stdin.end()
 		})
 	}
 }
@@ -71,7 +101,7 @@ const requireAuthentication = level => (req, res, next) => {
 	if (level === 'half' && req.session.authentication === level) {
 		next()
 	} else if (level === 'full' && req.session.authentication === level) {
-		const cert = user.certs.find(cert => cert.serial === req.session.serial)
+		const cert = user.certs.find(cert => cert.fingerprint === req.session.fingerprint)
 		if (cert && !cert.revoked) {
 			next()
 		} else {
@@ -117,18 +147,32 @@ app.get('/verify-certificate', (req, res) => {
 		if (!cert || !req.client.authorized) throw 'No valid certificate'
 		const user = db.find(user => user.uid === cert.subject.CN)
 		if (!user) throw `No such user: ${cert.subject.CN}`
-		const serial = parseInt(cert.serialNumber, 16)
-		const certEntry = user.certs.find((certEntry) => certEntry.serial === serial)
-		if (!certEntry) throw `Unknown certificate: ${cert.subject.CN} [${cert.hash}]`
+		const certEntry = user.certs.find((certEntry) => certEntry.fingerprint === cert.fingerprint)
+		if (!certEntry) throw `Unknown certificate: ${cert.subject.CN} [${cert.serialNumber}]`
 		req.session.authentication = 'full'
 		req.session.uid = cert.subject.CN
-		req.session.serial = serial
+		req.session.fingerprint = cert.fingerprint
 		certEntry.p12 = null
 		res.redirect('/')
 	} catch (errorMessage) {
 		req.flash('error', errorMessage)
 		res.redirect('/create-pkcs12')
 	}
+})
+
+app.get('/create-x509', requireAuthentication('half'), (req, res) => {
+	res.send(`<form method="POST">
+	             <keygen name="pubkey" keytype="RSA">
+	             <input type="submit" value="Create certificate">
+	          </form>`)
+})
+
+app.post('/create-x509', requireAuthentication('half'), (req, res) => {
+	const cert = new Cert(req.user.uid, req.headers['user-agent'])
+	const x509 = cert.createX509(req.body.pubkey).then((x509) => {
+		res.type('application/x-x509-user-cert')
+		res.send(x509)
+	}, error => res.status(500).send(error))
 })
 
 app.get('/create-pkcs12', requireAuthentication('half'), (req, res) => {
@@ -139,16 +183,16 @@ app.get('/create-pkcs12', requireAuthentication('half'), (req, res) => {
 app.post('/create-pkcs12', requireAuthentication('half'), (req, res) => {
 	const cert = new Cert(req.user.uid, req.headers['user-agent'])
 	req.user.certs.push(cert)
-	cert.generate().then(hash => {
-		console.log(`Certificate download URL: https://localhost:9999/download-pkcs12/${hash}/certificate.p12`)
-	})
+	cert.generatePkcs12().then(fingerprint => {
+		console.log(`Certificate download URL: https://localhost:9999/download-pkcs12/${fingerprint}/certificate.p12`)
+		res.send(`We sent an email to download your client certificate.
+				  Open the link <strong>in this browser</strong> to download the certificate, and add import it.`)
+	}, (error) => res.status(500).send(error.message))
 
-	res.send(`We sent an email to download your client certificate.
-	          Open the link <strong>in this browser</strong> to download the certificate, and add import it.`)
 })
 
-app.get('/download-pkcs12/:hash/certificate.p12', requireAuthentication('half'), (req, res) => {
-	const cert = req.user.certs.find(cert => cert.hash === req.params.hash)
+app.get('/download-pkcs12/:fingerprint/certificate.p12', requireAuthentication('half'), (req, res) => {
+	const cert = req.user.certs.find(cert => cert.fingerprint === req.params.fingerprint)
 	if (cert) {
 		if (cert.p12) {
 			res.type('application/x-pkcs12')
@@ -165,7 +209,7 @@ app.get('/download-pkcs12/:hash/certificate.p12', requireAuthentication('half'),
 
 app.get('/revoke-certificate', requireAuthentication('full'), (req, res) => {
 	const certs = req.user.certs.filter(cert => !cert.revoked)
-	const options = certs.map(cert => `<option value="${cert.serial}">
+	const options = certs.map(cert => `<option value="${cert.fingerprint}">
 	                                       Issued at ${cert.issuedAt} to ${cert.userAgent}
 	                                   </option>`)
 	                     .concat('\n')
@@ -178,13 +222,13 @@ app.get('/revoke-certificate', requireAuthentication('full'), (req, res) => {
 })
 
 app.post('/revoke-certificate', requireAuthentication('full'), (req, res) => {
-	const serial = req.body.certificate
-	if (serial) {
-		const cert = req.user.certs.find(cert => cert.serial === parseInt(serial, 10))
+	const fingerprint = req.body.certificate
+	if (fingerprint) {
+		const cert = req.user.certs.find(cert => cert.fingerprint === fingerprint)
 		if (cert) {
 			cert.revoked = true
-			if (cert.serial === req.session.serial) {
-				session.destroy()
+			if (cert.fingerprint === req.session.fingerprint) {
+				req.session.destroy()
 				res.redirect('/')
 			} else {
 				res.send('The certificate has been revoked. <a href="/">Go back</a>')
@@ -212,3 +256,6 @@ https.createServer(httpsOpts, app).listen(9999)
 // - [Old Web Crypto API on W3C](https://groups.google.com/a/chromium.org/forum/#!msg/blink-dev/z_qEpmzzKh8/BH-lkwdgBAAJ)
 // - ["How do you pipe a long string to /dev/stdin via child_process.spawn() in Node.js?" on javacms](http://www.javacms.tech/questions/408044/how-do-you-pipe-a-long-string-to-dev-stdin-via-child-process-spawn-in-node-js)
 // - [PKI.js](https://pkijs.org/)
+// - ["Removing keygen from HTML" thread on W3C's www-tag list](https://lists.w3.org/Archives/Public/www-tag/2016May/0006.html)
+// - [Keygen and Client Certificates](https://w3ctag.github.io/client-certificates/)
+// - [HOWTO set up a small server](http://chschneider.eu/linux/server/openssl.shtml)

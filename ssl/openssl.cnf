@@ -10,6 +10,7 @@ database = $dir/index
 new_certs_dir = $dir/clcerts
 default_md = md5
 policy = policy
+unique_subject = no
 
 default_days = 365
 x509_extensions = usr_cert
