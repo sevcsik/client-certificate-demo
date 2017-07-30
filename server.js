@@ -158,7 +158,7 @@ app.get('/verify-certificate', (req, res) => {
 		res.redirect('/')
 	} catch (errorMessage) {
 		req.flash('error', errorMessage)
-		res.redirect('/create-pkcs12')
+		res.redirect('/create-certificate')
 	}
 })
 
@@ -184,6 +184,20 @@ app.get('/create-pkcs12', requireAuthentication('half'), (req, res) => {
 	          <form method="POST"><input type="submit" value="Create certificate"></form>`)
 })
 
+app.get('/create-certificate', (req, res) => {
+	res.send(`
+		<form><keygen id="keygen"></form>
+		<script>
+			var keygen = document.getElementById('keygen')
+			if (typeof HTMLKeygenElement !== undefined || keygen.getAttribute('_moz-type') === '-mozilla-keygen') {
+				document.location.href = '/create-x509'
+			} else {
+				document.location.href = '/create-pkcs12'
+			}
+		</script>
+	`)
+})
+
 app.post('/create-pkcs12', requireAuthentication('half'), (req, res) => {
 	const cert = new Cert(req.user.uid, req.headers['user-agent'])
 	req.user.certs.push(cert)
@@ -203,11 +217,11 @@ app.get('/download-pkcs12/:fingerprint/certificate.p12', requireAuthentication('
 			res.send(cert.p12)
 		} else {
 			res.send(`You have already used this key, please creaate a new one.
-				      <a href="/create-pkcs12">Click here to create a new certificate</a>.`)
+				      <a href="/create-certificate">Click here to create a new certificate</a>.`)
 		}
 	} else {
 		res.send(`The download link is invalid.
-		          <a href="/create-pkcs12">Click here to create a new certificate</a>.`)
+		          <a href="/create-certificate">Click here to create a new certificate</a>.`)
 	}
 })
 
@@ -263,3 +277,4 @@ https.createServer(httpsOpts, app).listen(9999)
 // - ["Removing keygen from HTML" thread on W3C's www-tag list](https://lists.w3.org/Archives/Public/www-tag/2016May/0006.html)
 // - [Keygen and Client Certificates](https://w3ctag.github.io/client-certificates/)
 // - [HOWTO set up a small server](http://chschneider.eu/linux/server/openssl.shtml)
+// - [KEYGEN support does not belong in the parser](https://bugzilla.mozilla.org/show_bug.cgi?id=101019)
