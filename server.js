@@ -163,8 +163,9 @@ app.get('/verify-certificate', (req, res) => {
 })
 
 app.get('/create-x509', requireAuthentication('half'), (req, res) => {
+	const challenge = Math.floor(Math.random() * 100000000)
 	res.send(`<form method="POST">
-	             <keygen name="pubkey" keytype="RSA">
+	             <keygen name="pubkey" keytype="RSA" challenge="${challenge}">
 	             <input type="submit" value="Create certificate">
 	          </form>`)
 })
