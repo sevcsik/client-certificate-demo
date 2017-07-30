@@ -35,16 +35,18 @@ class Cert {
 	}
 
 	createX509(spkac) {
-		return new Promise((resolve, reject) => {
-			const ca = exec(`cat | openssl ca -batch -spkac /dev/stdin -config ssl/openssl.cnf -subj /CN=${this.uid}`
+		const certP = new Promise((resolve, reject) => {
+			const ca = exec(`cat | openssl ca -batch -notext -spkac /dev/stdin -config ssl/openssl.cnf -subj /CN=${this.uid}`
 				, (error, stdout, stderr) => {
 					if (error) reject(error)
 					else resolve(stdout)
 				})
 
-			ca.stdin.write('SPKAC=' + spkac)
+			ca.stdin.write('SPKAC=' + spkac.replace(/[\r\n]/g, ''))
 			ca.stdin.end()
-		}).then(this.getFingerprint).then(fingerprint => this.fingerprint = fingerprint)
+		})
+		certP.then(this.getFingerprint).then(fingerprint => this.fingerprint = fingerprint)
+		return certP
 	}
 
 	generatePkcs12() {
@@ -61,7 +63,7 @@ class Cert {
 			keygen.stdout.pipe(req.stdin)
 			req.stdout.pipe(ca.stdin)
 		}).then(({ key, cert }) => Promise.all(
-			[ new Promise((resolve, reject) => {
+			[new Promise((resolve, reject) => {
 				const pkcs12 = exec(`openssl pkcs12 -export -clcerts -nodes -password pass: -name "${this.uid}"`
 					, { encoding: null }
 					, (error, stdout, stderr) => {
@@ -169,6 +171,7 @@ app.get('/create-x509', requireAuthentication('half'), (req, res) => {
 
 app.post('/create-x509', requireAuthentication('half'), (req, res) => {
 	const cert = new Cert(req.user.uid, req.headers['user-agent'])
+	req.user.certs.push(cert)
 	const x509 = cert.createX509(req.body.pubkey).then((x509) => {
 		res.type('application/x-x509-user-cert')
 		res.send(x509)
