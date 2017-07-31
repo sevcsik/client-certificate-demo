@@ -34,6 +34,18 @@ class Cert {
 		this.uid = uid
 	}
 
+	getFingerprint(cert) {
+		return new Promise((resolve, reject) => {
+			const x509 = exec(`openssl x509 -fingerprint -out /dev/null`, (error, stdout, stderr) => {
+				if (error) reject(error)
+				else resolve(stdout.split('=')[1].trim())
+			})
+
+			x509.stdin.write(cert)
+			x509.stdin.end()
+		})
+	}
+
 	createX509(spkac, challenge) {
 		spkac = 'SPKAC=' + spkac.replace(/[\r\n]/g, '')
 		const certP = new Promise((resolve, reject) => {
@@ -91,18 +103,6 @@ class Cert {
 				pkcs12.stdin.end()
 			}), this.getFingerprint(cert)]
 		)).then(([_, fingerprint]) => this.fingerprint = fingerprint)
-	}
-
-	getFingerprint(cert) {
-		return new Promise((resolve, reject) => {
-			const x509 = exec(`openssl x509 -fingerprint -out /dev/null`, (error, stdout, stderr) => {
-				if (error) reject(error)
-				else resolve(stdout.split('=')[1].trim())
-			})
-
-			x509.stdin.write(cert)
-			x509.stdin.end()
-		})
 	}
 }
 
