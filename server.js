@@ -34,17 +34,30 @@ class Cert {
 		this.uid = uid
 	}
 
-	createX509(spkac) {
+	createX509(spkac, challenge) {
+		spkac = 'SPKAC=' + spkac.replace(/[\r\n]/g, '')
 		const certP = new Promise((resolve, reject) => {
+			const spkacProcess = exec('openssl spkac -verify', (error, stdout, stderr) => {
+				if (error) reject(error)
+				else {
+					const challenge_ = stdout.match(/Challenge String: (\d+)/)[1]
+					if (challenge_ && parseInt(challenge_, 10) === challenge) resolve()
+					else reject(new Error('SPKAC contains an invalid challenge string'))
+				}
+			})
+
+			spkacProcess.stdin.write(spkac)
+			spkacProcess.stdin.end()
+		}).then(() => new Promise((resolve, reject) => {
 			const ca = exec(`cat | openssl ca -batch -notext -spkac /dev/stdin -config ssl/openssl.cnf -subj /CN=${this.uid}`
 				, (error, stdout, stderr) => {
 					if (error) reject(error)
 					else resolve(stdout)
 				})
 
-			ca.stdin.write('SPKAC=' + spkac.replace(/[\r\n]/g, ''))
+			ca.stdin.write(spkac)
 			ca.stdin.end()
-		})
+		}))
 		certP.then(this.getFingerprint).then(fingerprint => this.fingerprint = fingerprint)
 		return certP
 	}
@@ -164,6 +177,7 @@ app.get('/verify-certificate', (req, res) => {
 
 app.get('/create-x509', requireAuthentication('half'), (req, res) => {
 	const challenge = Math.floor(Math.random() * 100000000)
+	req.session.challenge = challenge
 	res.send(`<form method="POST">
 	             <keygen name="pubkey" keytype="RSA" challenge="${challenge}">
 	             <input type="submit" value="Create certificate">
@@ -173,7 +187,7 @@ app.get('/create-x509', requireAuthentication('half'), (req, res) => {
 app.post('/create-x509', requireAuthentication('half'), (req, res) => {
 	const cert = new Cert(req.user.uid, req.headers['user-agent'])
 	req.user.certs.push(cert)
-	const x509 = cert.createX509(req.body.pubkey).then((x509) => {
+	const x509 = cert.createX509(req.body.pubkey, req.session.challenge).then((x509) => {
 		res.type('application/x-x509-user-cert')
 		res.send(x509)
 	}, error => res.status(500).send(error))
@@ -182,6 +196,17 @@ app.post('/create-x509', requireAuthentication('half'), (req, res) => {
 app.get('/create-pkcs12', requireAuthentication('half'), (req, res) => {
 	res.send(`You successfully logged in, but you don't have a valid certificate installed in this browser.
 	          <form method="POST"><input type="submit" value="Create certificate"></form>`)
+})
+
+app.post('/create-pkcs12', requireAuthentication('half'), (req, res) => {
+	const cert = new Cert(req.user.uid, req.headers['user-agent'])
+	req.user.certs.push(cert)
+	cert.generatePkcs12().then(fingerprint => {
+		console.log(`Certificate download URL: https://localhost:9999/download-pkcs12/${fingerprint}/certificate.p12`)
+		res.send(`We sent an email to download your client certificate.
+				  Open the link <strong>in this browser</strong> to download the certificate, and add import it.`)
+	}, (error) => res.status(500).send(error.message))
+
 })
 
 app.get('/create-certificate', (req, res) => {
@@ -198,16 +223,6 @@ app.get('/create-certificate', (req, res) => {
 	`)
 })
 
-app.post('/create-pkcs12', requireAuthentication('half'), (req, res) => {
-	const cert = new Cert(req.user.uid, req.headers['user-agent'])
-	req.user.certs.push(cert)
-	cert.generatePkcs12().then(fingerprint => {
-		console.log(`Certificate download URL: https://localhost:9999/download-pkcs12/${fingerprint}/certificate.p12`)
-		res.send(`We sent an email to download your client certificate.
-				  Open the link <strong>in this browser</strong> to download the certificate, and add import it.`)
-	}, (error) => res.status(500).send(error.message))
-
-})
 
 app.get('/download-pkcs12/:fingerprint/certificate.p12', requireAuthentication('half'), (req, res) => {
 	const cert = req.user.certs.find(cert => cert.fingerprint === req.params.fingerprint)
